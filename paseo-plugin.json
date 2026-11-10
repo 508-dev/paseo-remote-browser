@@ -1,0 +1,5 @@
+{
+  "id": "remote-browser",
+  "description": "A working browser on the Paseo host, controlled from mobile or desktop",
+  "requirements": { "paseo": ">=0.16.0-beta.1" }
+}
