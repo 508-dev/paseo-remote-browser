@@ -13,26 +13,32 @@ export function BrowserPanel({ workspaceId, theme, layout }: PluginWorkspacePane
   const [busy, setBusy] = useState(false);
   const [width, setWidth] = useState<number>(VIEWPORT.width);
   const editingAddress = useRef(false);
-  const inFlight = useRef(false);
+  const pendingCount = useRef(0);
+  const queue = useRef<Promise<void>>(Promise.resolve());
   const styles = useStyles(theme, layout.compact);
 
   const run = useCallback(
-    async (input: BrowserAction) => {
-      if (inFlight.current) return;
-      inFlight.current = true;
-      if (input.action !== "snapshot") setBusy(true);
-      try {
-        const result = await call(input);
-        setImage(result.image);
-        setTitle(result.title);
-        if (!editingAddress.current) setAddress(result.url === "about:blank" ? "" : result.url);
-        setStatus("");
-      } catch (error) {
-        setStatus(error instanceof Error ? error.message : String(error));
-      } finally {
-        inFlight.current = false;
-        setBusy(false);
-      }
+    (input: BrowserAction) => {
+      // Skip only periodic snapshots. User commands must wait their turn, never disappear.
+      if (input.action === "snapshot" && pendingCount.current > 0) return;
+      pendingCount.current += 1;
+      const execute = async () => {
+        if (input.action !== "snapshot") setBusy(true);
+        try {
+          const result = await call(input);
+          setImage(result.image);
+          setTitle(result.title);
+          if (!editingAddress.current) setAddress(result.url === "about:blank" ? "" : result.url);
+          setStatus("");
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : String(error));
+        } finally {
+          pendingCount.current -= 1;
+          if (pendingCount.current === 0) setBusy(false);
+        }
+      };
+      queue.current = queue.current.then(execute, execute);
+      return queue.current;
     },
     [call],
   );
