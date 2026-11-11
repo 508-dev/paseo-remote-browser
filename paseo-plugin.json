@@ -1,5 +1,10 @@
 {
   "id": "remote-browser",
   "description": "A working browser on the Paseo host, controlled from mobile or desktop",
-  "requirements": { "paseo": ">=0.16.0-beta.1" }
+  "requirements": {
+    "paseo": ">=0.16.0-beta.1"
+  },
+  "build": [
+    ["npm", "ci", "--omit=dev", "--legacy-peer-deps", "--ignore-scripts", "--no-audit", "--no-fund"]
+  ]
 }
