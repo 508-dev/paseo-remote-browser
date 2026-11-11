@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { launch, type Browser, type BrowserContext, type Page } from "puppeteer-core";
 import { normalizeUrl, VIEWPORT, type BrowserAction } from "../shared/browser";
 
 interface Session {
@@ -39,13 +39,13 @@ export class RemoteBrowser {
         await page.mouse.click(clamp(input.x, VIEWPORT.width), clamp(input.y, VIEWPORT.height));
         break;
       case "type":
-        await page.keyboard.insertText(input.text);
+        await page.keyboard.sendCharacter(input.text);
         break;
       case "key":
         await page.keyboard.press(input.key);
         break;
       case "scroll":
-        await page.mouse.wheel(input.x, input.y);
+        await page.mouse.wheel({ deltaX: input.x, deltaY: input.y });
         break;
       case "back":
         await page.goBack({ waitUntil: "domcontentloaded", timeout: 20_000 });
@@ -60,10 +60,8 @@ export class RemoteBrowser {
         break;
     }
     // Let immediate DOM updates paint before capture; the client also polls for later changes.
-    await page.waitForTimeout(80);
-    const image = (await page.screenshot({ type: "jpeg", quality: 68, timeout: 20_000 })).toString(
-      "base64",
-    );
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const image = await page.screenshot({ type: "jpeg", quality: 68, encoding: "base64" });
     return { url: page.url(), title: await page.title(), image };
   }
 
@@ -71,23 +69,27 @@ export class RemoteBrowser {
     const existing = this.sessions.get(workspaceId);
     if (existing) return existing;
     if (!this.browser) {
-      this.browser = await chromium.launch({
+      this.browser = await launch({
         headless: true,
+        pipe: true,
+        protocolTimeout: 20_000,
+        defaultViewport: VIEWPORT,
         ...(process.env.PASEO_BROWSER_EXECUTABLE
           ? { executablePath: process.env.PASEO_BROWSER_EXECUTABLE }
           : { channel: "chrome" }),
       });
     }
-    const context = await this.browser.newContext({ viewport: VIEWPORT });
-    await context.route("**/*", (route) => {
-      const protocol = new URL(route.request().url()).protocol;
-      if (["http:", "https:", "data:", "blob:"].includes(protocol)) void route.continue();
-      else void route.abort();
-    });
+    const context = await this.browser.createBrowserContext();
     const page = await context.newPage();
+    await configurePage(page);
     const session = { context, page };
     page.on("popup", (popup) => {
-      session.page = popup;
+      if (popup)
+        void configurePage(popup)
+          .then(() => {
+            session.page = popup;
+          })
+          .catch(() => popup.close());
     });
     this.sessions.set(workspaceId, session);
     return session;
@@ -108,6 +110,19 @@ export class RemoteBrowser {
     await this.browser?.close();
     this.browser = null;
   }
+}
+
+async function configurePage(page: Page): Promise<void> {
+  page.setDefaultTimeout(20_000);
+  await page.setRequestInterception(true);
+  page.on("request", (request) => {
+    const protocol = new URL(request.url()).protocol;
+    const pending = ["http:", "https:", "data:", "blob:"].includes(protocol)
+      ? request.continue()
+      : request.abort();
+    // Requests may disappear while their page or browser is closing.
+    void pending.catch(() => {});
+  });
 }
 
 function clamp(value: number, limit: number): number {
