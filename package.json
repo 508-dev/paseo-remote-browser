@@ -1,0 +1,39 @@
+{
+  "name": "@508-dev/paseo-remote-browser",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Control a browser running on a Paseo host from any Paseo client",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/508-dev/paseo-remote-browser.git"
+  },
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --bail=1",
+    "lint": "oxlint .",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check ."
+  },
+  "dependencies": {
+    "puppeteer-core": "24.26.1"
+  },
+  "devDependencies": {
+    "@getpaseo/client": "0.16.0-beta.1",
+    "@getpaseo/plugin": "0.16.0-beta.1",
+    "@types/debug": "4.1.12",
+    "@types/node": "^22.0.0",
+    "@types/react": "~19.2.0",
+    "@types/ws": "8.18.1",
+    "mitt": "3.0.1",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.61.0",
+    "parsel-js": "1.2.2",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "rxjs": "7.8.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6",
+    "zod": "^4.4.3"
+  }
+}
