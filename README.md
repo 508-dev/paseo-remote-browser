@@ -14,7 +14,7 @@ During review, install the PR branch:
 paseo plugin install git:508-dev/paseo-remote-browser --ref feat/remote-browser
 ```
 
-After PR #1 merges, omit `--ref` to use the default branch. The daemon needs npm on its command path. The manifest installs `playwright-core` from the committed lockfile with development dependencies and lifecycle scripts disabled. Chrome must already be installed on the host.
+After PR #1 merges, omit `--ref` to use the default branch. The daemon needs npm on its command path. The manifest installs `playwright-core` and the validation dependencies from the committed lockfile with lifecycle scripts disabled. Development dependencies are included because the current validator resolves Playwright’s optional Electron type declaration. The pinned `electron` package supplies those types; disabling lifecycle scripts prevents its binary download. Chrome must already be installed on the host.
 
 Enable **Remote browser** in Paseo's plugin settings. The panel appears in each workspace and in Command Center. For a local directory source, run the development install command below before adding the directory.
 
