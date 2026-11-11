@@ -8,13 +8,13 @@ The browser, cookies, and network requests stay on the host. Paseo's existing en
 
 Requires Paseo 0.16.0-beta.1 or newer, Node 22+, and Chrome or Chromium installed on the host. If Chrome is not in its standard location, set `PASEO_BROWSER_EXECUTABLE` to its executable path in the daemon environment. The plugin uses `puppeteer-core`, which does not download a browser during installation.
 
-During review, install the PR branch:
+Install directly from Git:
 
 ```sh
-paseo plugin install git:508-dev/paseo-remote-browser --ref feat/remote-browser
+paseo plugin install git:508-dev/paseo-remote-browser
 ```
 
-After PR #1 merges, omit `--ref` to use the default branch. The daemon needs npm on its command path. The manifest installs `puppeteer-core` and the validation dependencies from the committed lockfile with lifecycle scripts disabled. The pinned browser driver includes its protocol dependencies, and preparation does not download a browser binary. Chrome must already be installed on the host.
+The daemon needs npm on its command path. The manifest installs `puppeteer-core` and the validation dependencies from the committed lockfile with lifecycle scripts disabled. The pinned browser driver includes its protocol dependencies, and preparation does not download a browser binary. Chrome must already be installed on the host.
 
 Enable **Remote browser** in Paseo's plugin settings. The panel appears in each workspace and in Command Center. For a local directory source, run the development install command below before adding the directory.
 

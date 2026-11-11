@@ -3,15 +3,19 @@ import { normalizeUrl, VIEWPORT, type BrowserAction } from "../shared/browser";
 
 interface Session {
   context: BrowserContext;
-  page: Page;
+  page: Page | null;
+  pages: Set<Page>;
 }
 
 /** Each workspace gets its own cookies and page; Chromium is shared by the plugin process. */
 export class RemoteBrowser {
   private browser: Browser | null = null;
+  private launching: Promise<Browser> | null = null;
   private readonly sessions = new Map<string, Session>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private stopped = false;
+
+  constructor(private readonly startBrowser: typeof launch = launch) {}
 
   async control(input: BrowserAction): Promise<{ url: string; title: string; image: string }> {
     if (this.stopped) throw new Error("Remote browser is stopping");
@@ -27,7 +31,7 @@ export class RemoteBrowser {
 
   private async perform(input: BrowserAction) {
     const session = await this.session(input.workspaceId);
-    const page = session.page;
+    const page = await this.activePage(session);
     switch (input.action) {
       case "navigate":
         await page.goto(normalizeUrl(input.url), {
@@ -61,38 +65,76 @@ export class RemoteBrowser {
     }
     // Let immediate DOM updates paint before capture; the client also polls for later changes.
     await new Promise((resolve) => setTimeout(resolve, 80));
-    const image = await page.screenshot({ type: "jpeg", quality: 68, encoding: "base64" });
-    return { url: page.url(), title: await page.title(), image };
+    const capturePage = await this.activePage(session);
+    const image = await capturePage.screenshot({ type: "jpeg", quality: 68, encoding: "base64" });
+    return { url: capturePage.url(), title: await capturePage.title(), image };
+  }
+
+  private launchBrowser(): Promise<Browser> {
+    if (this.browser?.connected) return Promise.resolve(this.browser);
+    this.launching ??= this.startBrowser({
+      headless: true,
+      pipe: true,
+      protocolTimeout: 20_000,
+      defaultViewport: VIEWPORT,
+      ...(process.env.PASEO_BROWSER_EXECUTABLE
+        ? { executablePath: process.env.PASEO_BROWSER_EXECUTABLE }
+        : { channel: "chrome" }),
+    })
+      .then((browser) => {
+        this.browser = browser;
+        browser.once("disconnected", () => {
+          if (this.browser !== browser) return;
+          this.browser = null;
+          this.sessions.clear();
+        });
+        return browser;
+      })
+      .finally(() => {
+        this.launching = null;
+      });
+    return this.launching;
   }
 
   private async session(workspaceId: string): Promise<Session> {
     const existing = this.sessions.get(workspaceId);
     if (existing) return existing;
-    if (!this.browser) {
-      this.browser = await launch({
-        headless: true,
-        pipe: true,
-        protocolTimeout: 20_000,
-        defaultViewport: VIEWPORT,
-        ...(process.env.PASEO_BROWSER_EXECUTABLE
-          ? { executablePath: process.env.PASEO_BROWSER_EXECUTABLE }
-          : { channel: "chrome" }),
-      });
+    const browser = await this.launchBrowser();
+    const context = await browser.createBrowserContext();
+    const session: Session = { context, page: null, pages: new Set() };
+    try {
+      await this.activePage(session);
+      this.sessions.set(workspaceId, session);
+      return session;
+    } catch (error) {
+      await context.close().catch(() => {});
+      throw error;
     }
-    const context = await this.browser.createBrowserContext();
-    const page = await context.newPage();
+  }
+
+  private async activePage(session: Session): Promise<Page> {
+    if (session.page && !session.page.isClosed()) return session.page;
+    const page = await session.context.newPage();
+    await this.trackPage(session, page);
+    return page;
+  }
+
+  private async trackPage(session: Session, page: Page): Promise<void> {
     await configurePage(page);
-    const session = { context, page };
+    if (page.isClosed()) return;
+    session.pages.add(page);
+    session.page = page;
+    page.once("close", () => {
+      session.pages.delete(page);
+      if (session.page === page)
+        session.page = [...session.pages].filter((item) => !item.isClosed()).at(-1) ?? null;
+    });
     page.on("popup", (popup) => {
       if (popup)
-        void configurePage(popup)
-          .then(() => {
-            session.page = popup;
-          })
-          .catch(() => popup.close());
+        void this.trackPage(session, popup).catch(() => {
+          void popup.close().catch(() => {});
+        });
     });
-    this.sessions.set(workspaceId, session);
-    return session;
   }
 
   async closeWorkspace(workspaceId: string): Promise<void> {
@@ -114,6 +156,9 @@ export class RemoteBrowser {
 
 async function configurePage(page: Page): Promise<void> {
   page.setDefaultTimeout(20_000);
+  page.on("dialog", (dialog) => {
+    void dialog.dismiss().catch(() => {});
+  });
   await page.setRequestInterception(true);
   page.on("request", (request) => {
     const protocol = new URL(request.url()).protocol;

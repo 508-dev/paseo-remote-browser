@@ -13,7 +13,5 @@ export default function contribute(server: PluginServerContext) {
   server.addHook("workspace.archive.after", async ({ workspace }) => {
     await browser.closeWorkspace(workspace.id);
   });
-  return () => {
-    void browser.close();
-  };
+  return () => browser.close();
 }
