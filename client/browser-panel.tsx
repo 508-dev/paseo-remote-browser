@@ -1,244 +1,317 @@
-import { useRpc, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import { useRpc, useSubscription, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { browserRpc, VIEWPORT, type BrowserAction } from "../shared/browser";
+import { Image, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  browserRpc,
+  browserStream,
+  browserAck,
+  decodeFrame,
+  VIEWPORT,
+  type BrowserInput,
+} from "../shared/browser";
+import { bindBrowserSurface, frameSource } from "./web";
 
 export function BrowserPanel({ workspaceId, theme, layout }: PluginWorkspacePanelProps) {
   const call = useRpc(browserRpc);
+  const acknowledge = useRpc(browserAck);
   const [address, setAddress] = useState("");
-  const [typedText, setTypedText] = useState("");
-  const [image, setImage] = useState<string | null>(null);
-  const [title, setTitle] = useState("");
-  const [status, setStatus] = useState("Opening host browser…");
-  const [busy, setBusy] = useState(false);
+  const [title, setTitle] = useState("Host browser");
+  const [error, setError] = useState("");
+  const [picture, setPicture] = useState<{
+    uri: string;
+    sequence: number;
+    streamId: string;
+  } | null>(null);
+  const [generation, retry] = useState(0);
+  const [surface, setSurface] = useState<View | null>(null);
   const [width, setWidth] = useState<number>(VIEWPORT.width);
+  const [drag, setDrag] = useState(false);
+  const streamId = useRef("");
+  const releasePicture = useRef<() => void>(() => {});
+  const [keyboardText, setKeyboardText] = useState("");
   const editingAddress = useRef(false);
-  const pendingCount = useRef(0);
-  const queue = useRef<Promise<void>>(Promise.resolve());
+  const touch = useRef({ x: 0, y: 0, moved: false });
+  const pending = useRef(0);
   const styles = useStyles(theme, layout.compact);
-
-  const run = useCallback(
-    (input: BrowserAction) => {
-      // Skip only periodic snapshots. User commands must wait their turn, never disappear.
-      if (input.action === "snapshot" && pendingCount.current > 0) return;
-      pendingCount.current += 1;
-      const execute = async () => {
-        if (input.action !== "snapshot") setBusy(true);
-        try {
-          const result = await call(input);
-          setImage(result.image);
-          setTitle(result.title);
-          if (!editingAddress.current) setAddress(result.url === "about:blank" ? "" : result.url);
-          setStatus("");
-        } catch (error) {
-          setStatus(error instanceof Error ? error.message : String(error));
-        } finally {
-          pendingCount.current -= 1;
-          if (pendingCount.current === 0) setBusy(false);
-        }
-      };
-      queue.current = queue.current.then(execute, execute);
-      return queue.current;
+  const send = useCallback(
+    (input: BrowserInput) => {
+      if (
+        pending.current >= 128 &&
+        !((input.action === "key" || input.action === "pointer") && input.phase === "up")
+      ) {
+        setError("Input connection is falling behind; reopen the panel");
+        return;
+      }
+      pending.current++;
+      void call({ ...input, workspaceId })
+        .catch((cause: unknown) => setError(String(cause)))
+        .finally(() => pending.current--);
     },
-    [call],
+    [call, workspaceId],
   );
-
+  useEffect(() => bindBrowserSurface(surface, send), [surface, send]);
   useEffect(() => {
-    void run({ action: "snapshot", workspaceId });
-    const timer = setInterval(() => void run({ action: "snapshot", workspaceId }), 2_000);
-    return () => clearInterval(timer);
-  }, [run, workspaceId]);
-
-  const navigate = () => {
-    editingAddress.current = false;
-    void run({ action: "navigate", workspaceId, url: address });
-  };
-  const click = (x: number, y: number) => {
-    void run({
-      action: "click",
-      workspaceId,
-      x: Math.round((x / width) * VIEWPORT.width),
-      y: Math.round((y / (width * (VIEWPORT.height / VIEWPORT.width))) * VIEWPORT.height),
-    });
-  };
-
+    setPicture(null);
+    streamId.current = "";
+    return () => releasePicture.current();
+  }, [workspaceId, generation]);
+  // A key remount on Retry creates a fresh subscription without periodic screenshot requests.
   return (
-    <ScrollView
-      style={styles.screen}
-      contentContainerStyle={styles.content}
-      keyboardShouldPersistTaps="always"
+    <Stream
+      key={`${workspaceId}:${generation}`}
+      workspaceId={workspaceId}
+      onEvent={(event) => {
+        if (event instanceof Uint8Array) {
+          const frame = decodeFrame(event);
+          const source = frameSource(frame.jpeg);
+          releasePicture.current();
+          releasePicture.current = source.release;
+          setPicture({ uri: source.uri, sequence: frame.sequence, streamId: streamId.current });
+        } else {
+          streamId.current = event.streamId;
+          setTitle(event.title || "Host browser");
+          if (!editingAddress.current) setAddress(event.url === "about:blank" ? "" : event.url);
+        }
+      }}
     >
-      <Text style={styles.heading}>{title || "Host browser"}</Text>
-      <View style={styles.row}>
-        <TextInput
-          style={styles.address}
-          value={address}
-          onChangeText={setAddress}
-          onFocus={() => {
-            editingAddress.current = true;
-          }}
-          onBlur={() => {
-            editingAddress.current = false;
-          }}
-          onSubmitEditing={navigate}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-          returnKeyType="go"
-          placeholder="localhost:3000 or a URL"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          accessibilityLabel="Browser address"
-        />
-        <Action label="Go" onPress={navigate} styles={styles} disabled={busy} />
-      </View>
-      <View style={styles.row}>
-        <Action
-          label="Back"
-          onPress={() => void run({ action: "back", workspaceId })}
-          styles={styles}
-          disabled={busy}
-        />
-        <Action
-          label="Forward"
-          onPress={() => void run({ action: "forward", workspaceId })}
-          styles={styles}
-          disabled={busy}
-        />
-        <Action
-          label="Reload"
-          onPress={() => void run({ action: "reload", workspaceId })}
-          styles={styles}
-          disabled={busy}
-        />
-        <Action
-          label="↑"
-          onPress={() => void run({ action: "scroll", workspaceId, x: 0, y: -550 })}
-          styles={styles}
-          disabled={busy}
-        />
-        <Action
-          label="↓"
-          onPress={() => void run({ action: "scroll", workspaceId, x: 0, y: 550 })}
-          styles={styles}
-          disabled={busy}
-        />
-      </View>
-      <Text style={styles.status}>
-        {status || (busy ? "Updating…" : "Browser runs on the selected host")}
-      </Text>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Browser page; tap to click"
-        onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
-        onPress={(event) => click(event.nativeEvent.locationX, event.nativeEvent.locationY)}
-        style={styles.viewport}
-      >
-        {image ? (
-          <Image
-            source={{ uri: `data:image/jpeg;base64,${image}` }}
-            resizeMode="stretch"
-            style={styles.image}
-          />
-        ) : (
-          <Text style={styles.empty}>Browser screenshot appears here</Text>
-        )}
-      </Pressable>
-      <View style={styles.row}>
-        <TextInput
-          style={styles.address}
-          value={typedText}
-          onChangeText={setTypedText}
-          onSubmitEditing={() => {
-            void run({ action: "type", workspaceId, text: typedText });
-            setTypedText("");
-          }}
-          placeholder="Type into selected page field"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          accessibilityLabel="Text to type in browser"
-        />
-        <Action
-          label="Type"
-          onPress={() => {
-            void run({ action: "type", workspaceId, text: typedText });
-            setTypedText("");
-          }}
-          styles={styles}
-          disabled={busy || !typedText}
-        />
-      </View>
-      <View style={styles.row}>
-        {(["Enter", "Tab", "Escape", "Backspace"] as const).map((key) => (
-          <Action
-            key={key}
-            label={key}
-            onPress={() => void run({ action: "key", workspaceId, key })}
-            styles={styles}
-            disabled={busy}
-          />
-        ))}
-      </View>
-    </ScrollView>
+      {(status) => (
+        <View style={styles.screen}>
+          <Text style={styles.title}>{title}</Text>
+          <View style={styles.row}>
+            <TextInput
+              style={styles.address}
+              value={address}
+              onChangeText={setAddress}
+              onFocus={() => {
+                editingAddress.current = true;
+              }}
+              onBlur={() => {
+                editingAddress.current = false;
+              }}
+              onSubmitEditing={() => send({ action: "navigate", url: address })}
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="localhost:3000 or a URL"
+              placeholderTextColor={theme.colors.foregroundMuted}
+              accessibilityLabel="Browser address"
+            />
+            <Action
+              label="Go"
+              onPress={() => send({ action: "navigate", url: address })}
+              styles={styles}
+            />
+            {(["back", "forward", "reload"] as const).map((action) => (
+              <Action
+                key={action}
+                label={action}
+                onPress={() => send({ action })}
+                styles={styles}
+              />
+            ))}
+          </View>
+          <View style={styles.row}>
+            <Text style={styles.muted}>{error || status}</Text>
+            <Action
+              label="Reconnect"
+              onPress={() => {
+                setError("");
+                retry((value) => value + 1);
+              }}
+              styles={styles}
+            />
+          </View>
+          <View
+            ref={setSurface}
+            style={styles.viewport}
+            accessibilityLabel="Interactive host browser"
+            onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
+            onStartShouldSetResponder={() => Platform.OS !== "web"}
+            onResponderGrant={(event) => {
+              const { locationX: x, locationY: y } = event.nativeEvent;
+              touch.current = { x, y, moved: false };
+              if (drag)
+                send({
+                  action: "pointer",
+                  phase: "down",
+                  x: (x / width) * VIEWPORT.width,
+                  y: (y / width) * VIEWPORT.width,
+                  button: "left",
+                });
+            }}
+            onResponderMove={(event) => {
+              const { locationX: x, locationY: y } = event.nativeEvent;
+              const previous = touch.current;
+              if (Math.abs(x - previous.x) + Math.abs(y - previous.y) > 3) previous.moved = true;
+              if (drag)
+                send({
+                  action: "pointer",
+                  phase: "move",
+                  x: (x / width) * VIEWPORT.width,
+                  y: (y / width) * VIEWPORT.width,
+                  button: "left",
+                });
+              else if (previous.moved)
+                send({
+                  action: "scroll",
+                  x: ((previous.x - x) / width) * VIEWPORT.width,
+                  y: ((previous.y - y) / width) * VIEWPORT.width,
+                });
+              touch.current = { x, y, moved: previous.moved };
+            }}
+            onResponderRelease={(event) => {
+              const { locationX: x, locationY: y } = event.nativeEvent;
+              if (drag)
+                send({
+                  action: "pointer",
+                  phase: "up",
+                  x: (x / width) * VIEWPORT.width,
+                  y: (y / width) * VIEWPORT.width,
+                  button: "left",
+                });
+              else if (!touch.current.moved)
+                send({
+                  action: "click",
+                  x: (x / width) * VIEWPORT.width,
+                  y: (y / width) * VIEWPORT.width,
+                });
+            }}
+            onResponderTerminate={() => {
+              if (drag) send({ action: "pointer", phase: "up", x: 0, y: 0, button: "left" });
+            }}
+          >
+            {picture ? (
+              <Image
+                source={{ uri: picture.uri }}
+                resizeMode="stretch"
+                style={styles.image}
+                onLoad={() => {
+                  void acknowledge({
+                    streamId: picture.streamId,
+                    sequence: picture.sequence,
+                  }).catch((cause: unknown) => setError(String(cause)));
+                }}
+                onError={() => setError("Frame could not be displayed; reconnect to retry")}
+              />
+            ) : (
+              <Text style={styles.muted}>Connecting to host Chrome…</Text>
+            )}
+          </View>
+          {Platform.OS !== "web" ? (
+            <View style={styles.row}>
+              <TextInput
+                style={styles.address}
+                value={keyboardText}
+                placeholder="Tap to type in the focused page field"
+                placeholderTextColor={theme.colors.foregroundMuted}
+                accessibilityLabel="Host browser keyboard"
+                autoCorrect={false}
+                autoCapitalize="none"
+                onFocus={() => setKeyboardText("")}
+                onChangeText={(text) => {
+                  const previous = [...keyboardText];
+                  const next = [...text];
+                  let common = 0;
+                  while (
+                    common < previous.length &&
+                    common < next.length &&
+                    previous[common] === next[common]
+                  )
+                    common++;
+                  for (let index = common; index < previous.length; index++)
+                    send({ action: "key", key: "Backspace", phase: "press" });
+                  const inserted = next.slice(common).join("");
+                  if (inserted) send({ action: "type", text: inserted });
+                  setKeyboardText(text);
+                }}
+                onSubmitEditing={() => send({ action: "key", key: "Enter", phase: "press" })}
+              />
+              <Action
+                label={drag ? "Drag mode" : "Scroll mode"}
+                onPress={() => setDrag((value) => !value)}
+                styles={styles}
+              />
+              {(["Tab", "Escape"] as const).map((key) => (
+                <Action
+                  key={key}
+                  label={key}
+                  onPress={() => send({ action: "key", key, phase: "press" })}
+                  styles={styles}
+                />
+              ))}
+            </View>
+          ) : (
+            <Text style={styles.muted}>
+              Click the page to focus. Type, scroll, drag, or paste directly.
+            </Text>
+          )}
+        </View>
+      )}
+    </Stream>
   );
 }
 
+function Stream({
+  workspaceId,
+  onEvent,
+  children,
+}: {
+  workspaceId: string;
+  onEvent: (event: Uint8Array | { streamId: string; url: string; title: string }) => void;
+  children: (status: string) => React.ReactNode;
+}) {
+  const subscription = useSubscription(browserStream, { workspaceId }, onEvent);
+  return children(
+    subscription.status === "error" ? subscription.error.message : subscription.status,
+  );
+}
 function Action({
   label,
   onPress,
   styles,
-  disabled,
 }: {
   label: string;
-  onPress: () => void;
+  onPress(): void;
   styles: ReturnType<typeof useStyles>;
-  disabled?: boolean;
 }) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      disabled={disabled}
-      onPress={onPress}
-      style={styles.button}
-    >
+    <Pressable accessibilityRole="button" onPress={onPress} style={styles.button}>
       <Text style={styles.buttonText}>{label}</Text>
     </Pressable>
   );
 }
-
 function useStyles(theme: PluginWorkspacePanelProps["theme"], compact: boolean) {
   return useMemo(
     () =>
       StyleSheet.create({
-        screen: { flex: 1, backgroundColor: theme.colors.surface0 },
-        content: { padding: compact ? 12 : 24, gap: 10 },
-        heading: { color: theme.colors.foreground, fontSize: 18, fontWeight: "600" },
+        screen: {
+          flex: 1,
+          padding: compact ? 10 : 18,
+          gap: 10,
+          backgroundColor: theme.colors.surface0,
+        },
+        title: { color: theme.colors.foreground, fontSize: 18, fontWeight: "600" },
+        muted: { color: theme.colors.foregroundMuted },
         row: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
         address: {
           flex: 1,
-          minWidth: 180,
+          minWidth: 150,
           borderWidth: 1,
           borderColor: theme.colors.border,
           borderRadius: 6,
-          paddingHorizontal: 10,
-          paddingVertical: 7,
+          padding: 8,
           color: theme.colors.foreground,
         },
-        button: {
-          backgroundColor: theme.colors.surface2,
-          borderRadius: 6,
-          paddingHorizontal: 10,
-          paddingVertical: 8,
-        },
-        buttonText: { color: theme.colors.foreground, fontWeight: "600" },
-        status: { color: theme.colors.foregroundMuted },
+        button: { backgroundColor: theme.colors.surface2, padding: 8, borderRadius: 6 },
+        buttonText: { color: theme.colors.foreground },
         viewport: {
           width: "100%",
           aspectRatio: VIEWPORT.width / VIEWPORT.height,
           backgroundColor: theme.colors.surface2,
           alignItems: "center",
           justifyContent: "center",
+          overflow: "hidden",
         },
         image: { width: "100%", height: "100%" },
-        empty: { color: theme.colors.foregroundMuted },
       }),
     [theme, compact],
   );

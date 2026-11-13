@@ -1,4 +1,10 @@
-import { launch, type Browser, type BrowserContext, type Page } from "puppeteer-core";
+import {
+  launch,
+  type Browser,
+  type BrowserContext,
+  type Page,
+  type KeyInput,
+} from "puppeteer-core";
 import { normalizeUrl, VIEWPORT, type BrowserAction } from "../shared/browser";
 
 interface Session {
@@ -12,15 +18,19 @@ export class RemoteBrowser {
   private browser: Browser | null = null;
   private launching: Promise<Browser> | null = null;
   private readonly sessions = new Map<string, Session>();
+  private readonly opening = new Map<string, Promise<Session>>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private stopped = false;
 
   constructor(private readonly startBrowser: typeof launch = launch) {}
 
-  async control(input: BrowserAction): Promise<{ url: string; title: string; image: string }> {
+  async control(
+    input: BrowserAction,
+    capture = true,
+  ): Promise<{ url: string; title: string; image: string }> {
     if (this.stopped) throw new Error("Remote browser is stopping");
     const previous = this.queues.get(input.workspaceId) ?? Promise.resolve();
-    const pending = previous.catch(() => {}).then(() => this.perform(input));
+    const pending = previous.catch(() => {}).then(() => this.perform(input, capture));
     this.queues.set(input.workspaceId, pending);
     try {
       return await pending;
@@ -29,7 +39,7 @@ export class RemoteBrowser {
     }
   }
 
-  private async perform(input: BrowserAction) {
+  private async perform(input: BrowserAction, capture: boolean) {
     const session = await this.session(input.workspaceId);
     const page = await this.activePage(session);
     switch (input.action) {
@@ -42,11 +52,18 @@ export class RemoteBrowser {
       case "click":
         await page.mouse.click(clamp(input.x, VIEWPORT.width), clamp(input.y, VIEWPORT.height));
         break;
+      case "pointer":
+        await page.mouse.move(clamp(input.x, VIEWPORT.width), clamp(input.y, VIEWPORT.height));
+        if (input.phase === "down") await page.mouse.down({ button: input.button });
+        if (input.phase === "up") await page.mouse.up({ button: input.button });
+        break;
       case "type":
         await page.keyboard.sendCharacter(input.text);
         break;
       case "key":
-        await page.keyboard.press(input.key);
+        if (input.phase === "down") await page.keyboard.down(input.key as KeyInput);
+        else if (input.phase === "up") await page.keyboard.up(input.key as KeyInput);
+        else await page.keyboard.press(input.key as KeyInput);
         break;
       case "scroll":
         await page.mouse.wheel({ deltaX: input.x, deltaY: input.y });
@@ -63,11 +80,17 @@ export class RemoteBrowser {
       case "snapshot":
         break;
     }
-    // Let immediate DOM updates paint before capture; the client also polls for later changes.
+    if (!capture) return { url: page.url(), title: await page.title(), image: "" };
+    // Diagnostic snapshots wait for immediate DOM updates; interactive clients use the stream.
     await new Promise((resolve) => setTimeout(resolve, 80));
     const capturePage = await this.activePage(session);
     const image = await capturePage.screenshot({ type: "jpeg", quality: 68, encoding: "base64" });
     return { url: capturePage.url(), title: await capturePage.title(), image };
+  }
+
+  async page(workspaceId: string): Promise<Page> {
+    if (this.stopped) throw new Error("Remote browser is stopping");
+    return this.activePage(await this.session(workspaceId));
   }
 
   private launchBrowser(): Promise<Browser> {
@@ -99,6 +122,18 @@ export class RemoteBrowser {
   private async session(workspaceId: string): Promise<Session> {
     const existing = this.sessions.get(workspaceId);
     if (existing) return existing;
+    const existingOpening = this.opening.get(workspaceId);
+    if (existingOpening) return existingOpening;
+    const pending = this.createSession(workspaceId);
+    this.opening.set(workspaceId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.opening.get(workspaceId) === pending) this.opening.delete(workspaceId);
+    }
+  }
+
+  private async createSession(workspaceId: string): Promise<Session> {
     const browser = await this.launchBrowser();
     const context = await browser.createBrowserContext();
     const session: Session = { context, page: null, pages: new Set() };
@@ -139,6 +174,7 @@ export class RemoteBrowser {
 
   async closeWorkspace(workspaceId: string): Promise<void> {
     await this.queues.get(workspaceId)?.catch(() => {});
+    await this.opening.get(workspaceId)?.catch(() => {});
     const session = this.sessions.get(workspaceId);
     this.sessions.delete(workspaceId);
     await session?.context.close();
@@ -147,6 +183,7 @@ export class RemoteBrowser {
   async close(): Promise<void> {
     this.stopped = true;
     await Promise.allSettled(this.queues.values());
+    await Promise.allSettled(this.opening.values());
     await Promise.allSettled([...this.sessions.values()].map((session) => session.context.close()));
     this.sessions.clear();
     await this.browser?.close();

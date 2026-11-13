@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { launch } from "puppeteer-core";
 import { RemoteBrowser } from "./browser";
+import { BrowserStreams } from "./stream";
+import { decodeFrame } from "../shared/browser";
 import { normalizeUrl } from "../shared/browser";
 
 describe("browser URL validation", () => {
@@ -122,4 +124,75 @@ describe.skipIf(process.env.PASEO_BROWSER_INTEGRATION !== "1")("real host browse
     const clicked = await browser.control({ action: "click", workspaceId: "test", x: 40, y: 30 });
     expect(clicked.title).toBe("Clicked");
   }, 30_000);
+  it("streams changing pages without polling and bounds frames until the viewer acknowledges", async () => {
+    const workspaceId = "streaming";
+    const streams = new BrowserStreams();
+    const controller = new AbortController();
+    const page = await browser.page(workspaceId);
+    await page.setContent(
+      `<title>Live</title><div style="width:100px;height:100px;background:red;animation:move .5s infinite alternate"></div><style>@keyframes move { to { transform:translateX(200px);background:blue } }</style><input id="field" style="position:absolute;left:10px;top:150px" />`,
+    );
+    const frames: Uint8Array[] = [];
+    let streamId = "";
+    let streamedTitle = "";
+    const done = streams.watch(browser, workspaceId, {
+      signal: controller.signal,
+      push: async (event) => {
+        if (event instanceof Uint8Array) frames.push(event);
+        else {
+          streamId = event.streamId;
+          streamedTitle = event.title;
+        }
+      },
+    });
+    try {
+      await expect.poll(() => frames.length).toBe(1);
+      expect([...decodeFrame(frames[0]!).jpeg.subarray(0, 2)]).toEqual([255, 216]);
+      // Several browser animation frames pass, but the viewer still owns just one outstanding image.
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      expect(frames.length).toBe(1);
+      streams.ack(streamId, 999); // A stale/mismatched acknowledgement must not grant credit.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(frames.length).toBe(1);
+      streams.ack(streamId, decodeFrame(frames[0]!).sequence);
+      await expect.poll(() => frames.length).toBe(2);
+      expect(decodeFrame(frames[1]!).sequence).toBe(2);
+      streams.ack(streamId, 2);
+      await browser.control({ action: "navigate", workspaceId, url: `127.0.0.1:${port}` }, false);
+      await expect.poll(() => streamedTitle).toBe("Ready");
+      await expect.poll(() => frames.length).toBe(3);
+    } finally {
+      controller.abort();
+      await done;
+    }
+  }, 15_000);
+
+  it("types and drags directly without taking a screenshot for each input", async () => {
+    const workspaceId = "direct-input";
+    const page = await browser.page(workspaceId);
+    await page.setContent(
+      `<input id="field" style="position:absolute;left:10px;top:10px;width:200px;height:40px" /><script>document.addEventListener('mouseup', () => { document.title = 'Released' })</script>`,
+    );
+    const capture = vi.spyOn(page, "screenshot");
+    await browser.control({ action: "click", workspaceId, x: 30, y: 30 }, false);
+    await browser.control({ action: "type", workspaceId, text: "Hello 世界" }, false);
+    await browser.control({ action: "key", workspaceId, key: "Backspace", phase: "press" }, false);
+    expect(
+      await page.$eval("#field", (element) => (element as unknown as { value: string }).value),
+    ).toBe("Hello 世");
+    await browser.control(
+      { action: "pointer", workspaceId, phase: "down", x: 30, y: 30, button: "left" },
+      false,
+    );
+    await browser.control(
+      { action: "pointer", workspaceId, phase: "move", x: 200, y: 30, button: "left" },
+      false,
+    );
+    await browser.control(
+      { action: "pointer", workspaceId, phase: "up", x: 200, y: 30, button: "left" },
+      false,
+    );
+    expect(await page.title()).toBe("Released");
+    expect(capture).not.toHaveBeenCalled();
+  }, 15_000);
 });
