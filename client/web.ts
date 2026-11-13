@@ -87,6 +87,9 @@ export function bindBrowserSurface(ref: unknown, send: (input: BrowserInput) => 
     },
     keydown: (event) => {
       if (event.isComposing || composing) return;
+      // Local clipboard shortcuts must retain their browser default so the paste event can read text.
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "v")
+        return;
       if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) return;
       event.preventDefault();
       held.add(event.key);

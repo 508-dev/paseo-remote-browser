@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import ts from "typescript";
 import { createServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { launch } from "puppeteer-core";
@@ -194,5 +196,54 @@ describe.skipIf(process.env.PASEO_BROWSER_INTEGRATION !== "1")("real host browse
     );
     expect(await page.title()).toBe("Released");
     expect(capture).not.toHaveBeenCalled();
+  }, 15_000);
+  it("lets local paste shortcuts deliver clipboard text through the web input bridge", async () => {
+    const page = await browser.page("local-paste");
+    const origin = `http://127.0.0.1:${port}`;
+    await page
+      .browserContext()
+      .overridePermissions(origin, ["clipboard-read", "clipboard-sanitized-write"]);
+    await page.goto(origin);
+    await page.setContent('<div id="surface" style="width:500px;height:300px"></div>');
+    // Exercise the shipped web bridge in Chrome, isolating only RN's platform constant.
+    const source = (await readFile(new URL("../client/web.ts", import.meta.url), "utf8"))
+      .replace(/^import .*$/gm, "")
+      .replace(/^export /gm, "");
+    const javascript = ts.transpileModule(source, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    await page.addScriptTag({
+      content: `(() => {
+      const Platform = { OS: "web" }; const VIEWPORT = { width: 1024, height: 768 };
+      ${javascript}
+      window.received = [];
+      window.unbindSurface = bindBrowserSurface(document.querySelector('#surface'), input => window.received.push(input));
+    })()`,
+    });
+    await page.evaluate("navigator.clipboard.writeText('Local clipboard text')");
+    await page.focus("#surface");
+    await page.keyboard.down("Control");
+    await page.keyboard.press("KeyV");
+    await page.keyboard.up("Control");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          "window.received.filter(input => input.action === 'type').map(input => input.text)",
+        ),
+      )
+      .toEqual(["Local clipboard text"]);
+    expect(
+      await page.evaluate(
+        "window.received.filter(input => input.action === 'key' && input.key.toLowerCase() === 'v')",
+      ),
+    ).toEqual([]);
+    expect(
+      await page.evaluate(`(() => {
+      const event = new KeyboardEvent('keydown', { key: 'v', metaKey: true, cancelable: true, bubbles: true });
+      document.querySelector('#surface').dispatchEvent(event);
+      return event.defaultPrevented;
+    })()`),
+    ).toBe(false);
+    await page.evaluate("window.unbindSurface()");
   }, 15_000);
 });

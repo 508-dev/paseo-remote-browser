@@ -24,6 +24,7 @@ export function createTunnelListener(
     let token;
     let initialized = false;
     let receive = Promise.resolve();
+    let remoteClosed = false;
     let readyResolve;
     let readyReject;
     const ready = new Promise((resolve, reject) => {
@@ -43,7 +44,15 @@ export function createTunnelListener(
       update: (message) => {
         if (message.type === "plugin.rpc.closed") {
           if (message.payload.error) fail();
-          else socket.end();
+          else {
+            remoteClosed = true;
+            // Closure is ordered after events on the wire, but their local writes may still be queued.
+            receive = receive
+              .then(() => {
+                socket.end();
+              })
+              .catch(fail);
+          }
           return;
         }
         if (message.type !== "plugin.rpc.event") return;
@@ -65,7 +74,14 @@ export function createTunnelListener(
             );
             const credit = Buffer.alloc(4);
             credit.writeUInt32BE(bytes.byteLength);
-            await send(1, credit);
+            if (!remoteClosed) {
+              try {
+                await send(1, credit);
+              } catch (error) {
+                // A normally closed subscription has already retired its write capability.
+                if (!remoteClosed) throw error;
+              }
+            }
           })
           .catch(fail);
       },
@@ -92,8 +108,10 @@ export function createTunnelListener(
         for (let offset = 0; offset < bytes.length; offset += TUNNEL_CHUNK)
           await send(0, bytes.subarray(offset, offset + TUNNEL_CHUNK));
       }
-      if (!socket.destroyed) await send(2);
-    })().catch(fail);
+      if (!socket.destroyed && !remoteClosed) await send(2);
+    })().catch(() => {
+      if (!remoteClosed) fail();
+    });
   });
   listener.on("close", () => {
     for (const socket of sockets) socket.destroy();

@@ -190,6 +190,51 @@ describe("local browser port forwarding", () => {
     expect(Buffer.concat(chunks)).toEqual(response);
   }, 10_000);
 
+  it("drains queued response bytes when normal closure races an in-flight credit", async () => {
+    const expected = Buffer.concat([Buffer.alloc(64 * 1024, 0x31), Buffer.alloc(64 * 1024, 0x32)]);
+    let closeRemote: () => void = () => {};
+    const client: Pick<DaemonClient, "observePluginRpc" | "invokePluginRpc"> = {
+      invokePluginRpc: async (_plugin, _method, input) => {
+        if ((input as Uint8Array)[36] === 1) {
+          // The host closes and removes its token before this credit RPC returns.
+          closeRemote();
+          throw new Error("Tunnel closed");
+        }
+        return null;
+      },
+      observePluginRpc: () => ({
+        subscriptionId: "closing",
+        ready: Promise.resolve({ subscriptionId: "closing", requestId: "closing" }),
+        subscribe(observer) {
+          observer.snapshot({ subscriptionId: "closing", requestId: "closing" });
+          closeRemote = () =>
+            observer.update({ type: "plugin.rpc.closed", payload: { subscriptionId: "closing" } });
+          observer.update({
+            type: "plugin.rpc.event",
+            payload: {
+              subscriptionId: "closing",
+              event: { type: "ready", token: "00000000-0000-4000-8000-000000000001" },
+            },
+          });
+          observer.binary?.(expected.subarray(0, 64 * 1024));
+          observer.binary?.(expected.subarray(64 * 1024));
+          return () => {};
+        },
+        async release() {},
+      }),
+    };
+    const companion = createTunnelListener(client, { workspaceId: "closing", remotePort: 3000 });
+    const port = await listen(companion.listener);
+    cleanup.push(() => companion.close());
+    const socket = createConnection({ host: "127.0.0.1", port, allowHalfOpen: true });
+    socket.end("request");
+    const chunks: Buffer[] = [];
+    for await (const chunk of socket) chunks.push(chunk);
+    const received = Buffer.concat(chunks);
+    expect(received.byteLength).toBe(expected.byteLength);
+    expect(received.equals(expected)).toBe(true);
+  });
+
   it("reports refused upstream ports instead of leaving a live subscription", async () => {
     const upstream = createServer();
     upstream.listen(0, "127.0.0.1");
