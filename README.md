@@ -1,5 +1,7 @@
 # Paseo remote browser
 
+Development continues in [508-dev/paseo-plugins](https://github.com/508-dev/paseo-plugins/tree/main/plugins/remote-browser). This repository remains installable for existing sources. Read the [migration guide](https://github.com/508-dev/paseo-plugins/blob/main/docs/migration.md) before switching an existing installation.
+
 Two interactive browser prototypes using Paseo's existing encrypted connection. Neither opens an inbound port on the host or changes the relay.
 
 |                              | Stream the host browser                               | Forward a dev site                                                 |
